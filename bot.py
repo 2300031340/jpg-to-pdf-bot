@@ -1,5 +1,6 @@
 import os
 import time
+import threading
 from PIL import Image
 from flask import Flask, request
 from telegram import Update, InputFile
@@ -7,18 +8,24 @@ from telegram.ext import (
     ApplicationBuilder, CommandHandler, MessageHandler, filters,
     ContextTypes, ConversationHandler
 )
-from telegram.ext import Application
 
 user_sessions = {}
 ASK_NAME = 1
 SESSION_TIMEOUT = 600  # 10 minutes
 
-# Flask app for Render
 app = Flask(__name__)
+telegram_app = None  # global telegram app reference
 
 @app.route('/')
 def home():
     return "🤖 Bot is live with webhook!"
+
+@app.route('/webhook', methods=['POST'])
+async def webhook():
+    data = request.get_json(force=True)
+    update = Update.de_json(data, telegram_app.bot)
+    await telegram_app.process_update(update)
+    return "ok"
 
 def is_image_file(filename):
     return filename.lower().endswith((".jpg", ".jpeg", ".png"))
@@ -106,21 +113,10 @@ async def receive_pdf_name(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_sessions[user_id] = {"images": [], "last_active": time.time()}
     return ConversationHandler.END
 
-# Global application object
-telegram_app: Application = None
-
-@app.route('/webhook', methods=['POST'])
-async def webhook():
-    if request.method == "POST":
-        data = request.get_json(force=True)
-        update = Update.de_json(data, telegram_app.bot)
-        await telegram_app.process_update(update)
-        return "ok"
-
-async def main():
+async def run_bot():
     global telegram_app
     TOKEN = os.getenv("BOT_TOKEN")
-    WEBHOOK_URL = os.getenv("WEBHOOK_URL")  # e.g., https://your-app.onrender.com/webhook
+    WEBHOOK_URL = os.getenv("WEBHOOK_URL")  # https://yourdomain.com/webhook
 
     telegram_app = ApplicationBuilder().token(TOKEN).build()
 
@@ -136,8 +132,20 @@ async def main():
 
     await telegram_app.bot.set_webhook(url=WEBHOOK_URL)
 
-if __name__ == "__main__":
-    import asyncio
-    asyncio.run(main())
+    # Start polling or idle so bot stays alive
+    await telegram_app.initialize()
+    await telegram_app.start()
+    await telegram_app.updater.start_polling()  # optional if you want polling fallback
+    await telegram_app.updater.idle()
+
+def run_flask():
     port = int(os.environ.get("PORT", 10000))
     app.run(host="0.0.0.0", port=port)
+
+if __name__ == "__main__":
+    # Run Flask in a thread so it doesn't block asyncio event loop
+    flask_thread = threading.Thread(target=run_flask)
+    flask_thread.start()
+
+    import asyncio
+    asyncio.run(run_bot())
