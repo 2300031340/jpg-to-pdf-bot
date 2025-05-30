@@ -1,6 +1,8 @@
 import os
 import time
+import threading
 from PIL import Image
+from flask import Flask
 from telegram import Update, InputFile
 from telegram.ext import (
     ApplicationBuilder, CommandHandler, MessageHandler, filters,
@@ -9,7 +11,13 @@ from telegram.ext import (
 
 user_sessions = {}
 ASK_NAME = 1
-SESSION_TIMEOUT = 600  # 10 minutes in seconds
+SESSION_TIMEOUT = 600  # 10 minutes
+
+app = Flask(__name__)  # Flask app for Render
+
+@app.route('/')
+def home():
+    return "Bot is running!"
 
 def is_image_file(filename):
     return filename.lower().endswith((".jpg", ".jpeg", ".png"))
@@ -22,19 +30,16 @@ async def handle_images(update: Update, context: ContextTypes.DEFAULT_TYPE):
     current_time = time.time()
     user_sessions.setdefault(user_id, {"images": [], "last_active": current_time})
 
-    # Clear session if too old
     if current_time - user_sessions[user_id]["last_active"] > SESSION_TIMEOUT:
         user_sessions[user_id] = {"images": [], "last_active": current_time}
 
     file_path = None
 
-    # Handle photos
     if update.message.photo:
         photo = await update.message.photo[-1].get_file()
         file_path = f"{user_id}_{photo.file_id}.jpg"
         await photo.download_to_drive(file_path)
 
-    # Handle documents (jpg or png)
     elif update.message.document:
         document = update.message.document
         if is_image_file(document.file_name):
@@ -61,7 +66,6 @@ async def handle_trigger(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("❌ No images found. Please send some first.")
         return ConversationHandler.END
 
-    # Clear old sessions
     if current_time - session["last_active"] > SESSION_TIMEOUT:
         user_sessions[user_id] = {"images": [], "last_active": current_time}
         await update.message.reply_text("⌛ Your previous session expired. Please send images again.")
@@ -91,7 +95,6 @@ async def receive_pdf_name(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     await update.message.reply_document(InputFile(pdf_path))
 
-    # Clean up
     os.remove(pdf_path)
     for img_path in session["images"]:
         try:
@@ -100,12 +103,11 @@ async def receive_pdf_name(update: Update, context: ContextTypes.DEFAULT_TYPE):
             pass
 
     user_sessions[user_id] = {"images": [], "last_active": time.time()}
-
     return ConversationHandler.END
 
-def main():
+def run_bot():
     TOKEN = os.getenv("BOT_TOKEN")
-    app = ApplicationBuilder().token(TOKEN).build()
+    app_telegram = ApplicationBuilder().token(TOKEN).build()
 
     conv_handler = ConversationHandler(
         entry_points=[MessageHandler(filters.TEXT & filters.Regex("(?i)pdf"), handle_trigger)],
@@ -113,11 +115,12 @@ def main():
         fallbacks=[]
     )
 
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(MessageHandler(filters.PHOTO | filters.Document.IMAGE, handle_images))
-    app.add_handler(conv_handler)
+    app_telegram.add_handler(CommandHandler("start", start))
+    app_telegram.add_handler(MessageHandler(filters.PHOTO | filters.Document.IMAGE, handle_images))
+    app_telegram.add_handler(conv_handler)
 
-    app.run_polling()
+    app_telegram.run_polling()
 
 if __name__ == "__main__":
-    main()
+    threading.Thread(target=run_bot).start()
+    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 10000)))
