@@ -1,23 +1,24 @@
 import os
 import time
-import threading
 from PIL import Image
-from flask import Flask
+from flask import Flask, request
 from telegram import Update, InputFile
 from telegram.ext import (
     ApplicationBuilder, CommandHandler, MessageHandler, filters,
     ContextTypes, ConversationHandler
 )
+from telegram.ext import Application
 
 user_sessions = {}
 ASK_NAME = 1
 SESSION_TIMEOUT = 600  # 10 minutes
 
-app = Flask(__name__)  # Flask app for Render
+# Flask app for Render
+app = Flask(__name__)
 
 @app.route('/')
 def home():
-    return "Bot is running!"
+    return "🤖 Bot is live with webhook!"
 
 def is_image_file(filename):
     return filename.lower().endswith((".jpg", ".jpeg", ".png"))
@@ -92,7 +93,7 @@ async def receive_pdf_name(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     pdf_path = f"{name}.pdf"
     images[0].save(pdf_path, save_all=True, append_images=images[1:])
-    
+
     await update.message.reply_document(InputFile(pdf_path))
 
     os.remove(pdf_path)
@@ -105,9 +106,23 @@ async def receive_pdf_name(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_sessions[user_id] = {"images": [], "last_active": time.time()}
     return ConversationHandler.END
 
-def run_bot():
+# Global application object
+telegram_app: Application = None
+
+@app.route('/webhook', methods=['POST'])
+async def webhook():
+    if request.method == "POST":
+        data = request.get_json(force=True)
+        update = Update.de_json(data, telegram_app.bot)
+        await telegram_app.process_update(update)
+        return "ok"
+
+async def main():
+    global telegram_app
     TOKEN = os.getenv("BOT_TOKEN")
-    app_telegram = ApplicationBuilder().token(TOKEN).build()
+    WEBHOOK_URL = os.getenv("WEBHOOK_URL")  # e.g., https://your-app.onrender.com/webhook
+
+    telegram_app = ApplicationBuilder().token(TOKEN).build()
 
     conv_handler = ConversationHandler(
         entry_points=[MessageHandler(filters.TEXT & filters.Regex("(?i)pdf"), handle_trigger)],
@@ -115,12 +130,14 @@ def run_bot():
         fallbacks=[]
     )
 
-    app_telegram.add_handler(CommandHandler("start", start))
-    app_telegram.add_handler(MessageHandler(filters.PHOTO | filters.Document.IMAGE, handle_images))
-    app_telegram.add_handler(conv_handler)
+    telegram_app.add_handler(CommandHandler("start", start))
+    telegram_app.add_handler(MessageHandler(filters.PHOTO | filters.Document.IMAGE, handle_images))
+    telegram_app.add_handler(conv_handler)
 
-    app_telegram.run_polling()
+    await telegram_app.bot.set_webhook(url=WEBHOOK_URL)
 
 if __name__ == "__main__":
-    threading.Thread(target=run_bot).start()
-    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 10000)))
+    import asyncio
+    asyncio.run(main())
+    port = int(os.environ.get("PORT", 10000))
+    app.run(host="0.0.0.0", port=port)
