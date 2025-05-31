@@ -2,6 +2,7 @@ import os
 import time
 import threading
 import logging
+import asyncio
 from PIL import Image
 from flask import Flask, request
 from telegram import Update, InputFile
@@ -17,6 +18,7 @@ SESSION_TIMEOUT = 600  # 10 minutes
 
 app = Flask(__name__)
 telegram_app = None  # Global telegram app reference
+loop = None  # Global event loop reference
 
 logging.basicConfig(level=logging.INFO)
 
@@ -28,10 +30,15 @@ def home():
 
 
 @app.route('/webhook', methods=['POST'])
-async def webhook():
+def webhook():
     data = request.get_json(force=True)
     update = Update.de_json(data, telegram_app.bot)
-    await telegram_app.process_update(update)
+    
+    # Run the update processing in the event loop
+    asyncio.run_coroutine_threadsafe(
+        telegram_app.process_update(update),
+        loop
+    )
     return "ok"
 
 
@@ -132,7 +139,7 @@ async def receive_pdf_name(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # --- Bot Runner ---
 async def run_bot():
-    global telegram_app
+    global telegram_app, loop
     TOKEN = os.getenv("BOT_TOKEN")
     WEBHOOK_URL = os.getenv("WEBHOOK_URL")
 
@@ -157,19 +164,33 @@ async def run_bot():
     await telegram_app.initialize()
     await telegram_app.start()
     logging.info("Bot started with webhook.")
-    await telegram_app.updater.idle()
+    
+    # Keep the event loop running
+    while True:
+        await asyncio.sleep(1)
 
 
 # --- Flask Runner ---
 def run_flask():
-    port = int(os.environ["PORT"])
+    port = int(os.environ.get("PORT", 10000))
     app.run(host="0.0.0.0", port=port)
 
 
 # --- Main Entrypoint ---
 if __name__ == "__main__":
+    # Create and set the event loop
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    
+    # Start Flask in a separate thread
     flask_thread = threading.Thread(target=run_flask)
+    flask_thread.daemon = True
     flask_thread.start()
-
-    import asyncio
-    asyncio.run(run_bot())
+    
+    # Run the bot in the main thread
+    try:
+        loop.run_until_complete(run_bot())
+    except KeyboardInterrupt:
+        logging.info("Bot stopped by user")
+    finally:
+        loop.close()
