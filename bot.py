@@ -110,14 +110,18 @@ async def receive_pdf_name(update: Update, context: ContextTypes.DEFAULT_TYPE):
     session = user_sessions.get(user_id, {})
 
     images = []
+    logging.info(f"Session images: {session.get('images', [])}")
     for path in session.get("images", []):
         try:
-            images.append(Image.open(path).convert("RGB"))
+            img = Image.open(path).convert("RGB")
+            images.append(img)
+            logging.info(f"Loaded image: {path}")
         except Exception as e:
             logging.warning(f"Failed to open image: {path} - {e}")
 
     if not images:
         await update.message.reply_text("❌ No valid images to convert.")
+        logging.error("No valid images to convert. PDF not created.")
         return ConversationHandler.END
 
     pdf_path = f"{name}.pdf"
