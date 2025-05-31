@@ -1,7 +1,6 @@
 import os
 import time
 import threading
-import asyncio
 import logging
 from PIL import Image
 from flask import Flask, request
@@ -16,9 +15,10 @@ user_sessions = {}
 ASK_NAME = 1
 SESSION_TIMEOUT = 600  # 10 minutes
 
-logging.basicConfig(level=logging.INFO)
 app = Flask(__name__)
-telegram_app = None  # will hold our ApplicationBuilder instance
+telegram_app = None  # Global telegram app reference
+
+logging.basicConfig(level=logging.INFO)
 
 
 # --- Routes ---
@@ -28,21 +28,11 @@ def home():
 
 
 @app.route('/webhook', methods=['POST'])
-def webhook():
-    """
-    Synchronous endpoint: collect JSON, build Update, then schedule it
-    on the bot's asyncio loop without awaiting here.
-    """
-    try:
-        data = request.get_json(force=True)
-        update = Update.de_json(data, telegram_app.bot)
-
-        # Schedule the processing of this update in bot's loop:
-        asyncio.get_event_loop().create_task(telegram_app.process_update(update))
-        return "ok"
-    except Exception as e:
-        logging.exception("Error in /webhook handler:")
-        return "error", 500
+async def webhook():
+    data = request.get_json(force=True)
+    update = Update.de_json(data, telegram_app.bot)
+    await telegram_app.process_update(update)
+    return "ok"
 
 
 # --- Helpers ---
@@ -52,9 +42,7 @@ def is_image_file(filename):
 
 # --- Handlers ---
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(
-        "👋 Send JPG or PNG images (as photos or documents). Type 'pdf' when done."
-    )
+    await update.message.reply_text("👋 Send JPG or PNG images (as photos or documents). Type 'pdf' when done.")
 
 
 async def handle_images(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -62,13 +50,11 @@ async def handle_images(update: Update, context: ContextTypes.DEFAULT_TYPE):
     current_time = time.time()
     session = user_sessions.setdefault(user_id, {"images": [], "last_active": current_time})
 
-    # If session timed out, clear previous images
     if current_time - session["last_active"] > SESSION_TIMEOUT:
         session["images"].clear()
 
     file_path = None
 
-    # Photo vs Document
     if update.message.photo:
         photo = await update.message.photo[-1].get_file()
         file_path = f"{user_id}_{photo.file_id}.jpg"
@@ -121,7 +107,7 @@ async def receive_pdf_name(update: Update, context: ContextTypes.DEFAULT_TYPE):
         try:
             images.append(Image.open(path).convert("RGB"))
         except Exception as e:
-            logging.warning(f"Failed to open image {path}: {e}")
+            logging.warning(f"Failed to open image: {path} - {e}")
 
     if not images:
         await update.message.reply_text("❌ No valid images to convert.")
@@ -132,7 +118,7 @@ async def receive_pdf_name(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await update.message.reply_document(InputFile(pdf_path))
 
-    # Cleanup files
+    # Cleanup
     try:
         os.remove(pdf_path)
         for img_path in session["images"]:
@@ -140,12 +126,11 @@ async def receive_pdf_name(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         logging.warning(f"Cleanup error: {e}")
 
-    # Reset session
     user_sessions[user_id] = {"images": [], "last_active": time.time()}
     return ConversationHandler.END
 
 
-# --- Bot Runner (async) ---
+# --- Bot Runner ---
 async def run_bot():
     global telegram_app
     TOKEN = os.getenv("BOT_TOKEN")
@@ -154,10 +139,8 @@ async def run_bot():
     if not TOKEN or not WEBHOOK_URL:
         raise RuntimeError("Missing BOT_TOKEN or WEBHOOK_URL environment variable")
 
-    # Build the bot application
     telegram_app = ApplicationBuilder().token(TOKEN).build()
 
-    # Conversation handler for "pdf" → ask filename → create PDF
     conv_handler = ConversationHandler(
         entry_points=[MessageHandler(filters.TEXT & filters.Regex("(?i)pdf"), handle_trigger)],
         states={ASK_NAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, receive_pdf_name)]},
@@ -169,25 +152,24 @@ async def run_bot():
     telegram_app.add_handler(conv_handler)
 
     logging.info(f"Setting webhook to {WEBHOOK_URL}")
-    webhook_ok = await telegram_app.bot.set_webhook(url=WEBHOOK_URL)
-    logging.info(f"Webhook set: {webhook_ok}")
+    await telegram_app.bot.set_webhook(url=WEBHOOK_URL)
 
     await telegram_app.initialize()
     await telegram_app.start()
-    logging.info("Bot started with webhook mode.")
+    logging.info("Bot started with webhook.")
     await telegram_app.updater.idle()
 
 
-# --- Flask Runner (sync) ---
+# --- Flask Runner ---
 def run_flask():
     port = int(os.environ["PORT"])
     app.run(host="0.0.0.0", port=port)
 
 
+# --- Main Entrypoint ---
 if __name__ == "__main__":
-    # 1) Start Flask in its own thread
-    flask_thread = threading.Thread(target=run_flask, daemon=True)
+    flask_thread = threading.Thread(target=run_flask)
     flask_thread.start()
 
-    # 2) Run the bot's asyncio loop
+    import asyncio
     asyncio.run(run_bot())
