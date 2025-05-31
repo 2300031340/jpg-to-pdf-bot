@@ -129,7 +129,31 @@ async def receive_pdf_name(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     try:
         with open(pdf_path, "wb") as f:
-            images[0].save(f, format="PDF", save_all=True, append_images=images[1:])
+            # Convert all images to RGB mode and ensure they're not empty
+            rgb_images = []
+            for img in images:
+                if img.mode != 'RGB':
+                    img = img.convert('RGB')
+                # Ensure image has content
+                if img.getbbox():
+                    rgb_images.append(img)
+                else:
+                    logging.warning(f"Skipping empty image: {img.size}")
+            
+            if not rgb_images:
+                logging.error("No valid images to convert to PDF")
+                await update.message.reply_text("❌ No valid images to convert. Please try again.")
+                return ConversationHandler.END
+                
+            # Save first image as PDF
+            rgb_images[0].save(
+                f,
+                format="PDF",
+                save_all=True,
+                append_images=rgb_images[1:],
+                resolution=100.0,
+                quality=95
+            )
         logging.info(f"PDF created successfully at: {pdf_path}")
         
         # Verify PDF file exists and has content
