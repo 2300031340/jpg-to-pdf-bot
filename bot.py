@@ -124,7 +124,7 @@ async def receive_pdf_name(update: Update, context: ContextTypes.DEFAULT_TYPE):
     images[0].save(pdf_path, save_all=True, append_images=images[1:])
 
     await update.message.reply_document(
-        InputFile(pdf_path, filename=f"{name}.pdf", mime_type="application/pdf")
+        InputFile(pdf_path, filename=f"{name}.pdf")
     )
 
     # Cleanup
