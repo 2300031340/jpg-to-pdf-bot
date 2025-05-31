@@ -115,7 +115,7 @@ async def receive_pdf_name(update: Update, context: ContextTypes.DEFAULT_TYPE):
         try:
             img = Image.open(path).convert("RGB")
             images.append(img)
-            logging.info(f"Loaded image: {path}")
+            logging.info(f"Loaded image: {path} - Size: {img.size}")
         except Exception as e:
             logging.warning(f"Failed to open image: {path} - {e}")
 
@@ -125,18 +125,43 @@ async def receive_pdf_name(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return ConversationHandler.END
 
     pdf_path = f"{name}.pdf"
-    with open(pdf_path, "wb") as f:
-        images[0].save(f, format="PDF", save_all=True, append_images=images[1:])
+    logging.info(f"Creating PDF at: {pdf_path} with {len(images)} images")
+    
+    try:
+        with open(pdf_path, "wb") as f:
+            images[0].save(f, format="PDF", save_all=True, append_images=images[1:])
+        logging.info(f"PDF created successfully at: {pdf_path}")
+        
+        # Verify PDF file exists and has content
+        if os.path.exists(pdf_path):
+            file_size = os.path.getsize(pdf_path)
+            logging.info(f"PDF file size: {file_size} bytes")
+            if file_size == 0:
+                logging.error("PDF file was created but is empty!")
+        else:
+            logging.error("PDF file was not created!")
+            
+    except Exception as e:
+        logging.error(f"Error creating PDF: {e}")
+        await update.message.reply_text("❌ Error creating PDF. Please try again.")
+        return ConversationHandler.END
 
-    await update.message.reply_document(
-        InputFile(pdf_path, filename=f"{name}.pdf")
-    )
+    try:
+        await update.message.reply_document(
+            InputFile(pdf_path, filename=f"{name}.pdf")
+        )
+        logging.info("PDF sent successfully to user")
+    except Exception as e:
+        logging.error(f"Error sending PDF to user: {e}")
+        await update.message.reply_text("❌ Error sending PDF. Please try again.")
+        return ConversationHandler.END
 
     # Cleanup
     try:
         os.remove(pdf_path)
         for img_path in session["images"]:
             os.remove(img_path)
+        logging.info("Cleanup completed successfully")
     except Exception as e:
         logging.warning(f"Cleanup error: {e}")
 
