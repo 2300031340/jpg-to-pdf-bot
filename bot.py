@@ -17,8 +17,8 @@ ASK_NAME = 1
 SESSION_TIMEOUT = 600  # 10 minutes
 
 app = Flask(__name__)
-telegram_app = None  # Global telegram app reference
-loop = None  # Global event loop reference
+telegram_app = None
+loop = None
 
 logging.basicConfig(level=logging.INFO)
 
@@ -33,8 +33,6 @@ def home():
 def webhook():
     data = request.get_json(force=True)
     update = Update.de_json(data, telegram_app.bot)
-    
-    # Run the update processing in the event loop
     asyncio.run_coroutine_threadsafe(
         telegram_app.process_update(update),
         loop
@@ -62,27 +60,43 @@ async def handle_images(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     file_path = None
 
-    if update.message.photo:
-        photo = await update.message.photo[-1].get_file()
-        file_path = f"{user_id}_{photo.file_id}.jpg"
-        await photo.download_to_drive(file_path)
+    try:
+        if update.message.photo:
+            photo = await update.message.photo[-1].get_file()
+            file_path = f"{user_id}_{photo.file_id}.jpg"
+            with open(file_path, 'wb') as f:
+                await photo.download(out=f)
 
-    elif update.message.document:
-        doc = update.message.document
-        if is_image_file(doc.file_name):
-            file_path = f"{user_id}_{doc.file_unique_id}_{doc.file_name}"
-            doc_file = await doc.get_file()
-            await doc_file.download_to_drive(file_path)
+        elif update.message.document:
+            doc = update.message.document
+            if is_image_file(doc.file_name):
+                file_path = f"{user_id}_{doc.file_unique_id}_{doc.file_name}"
+                doc_file = await doc.get_file()
+                with open(file_path, 'wb') as f:
+                    await doc_file.download(out=f)
+            else:
+                await update.message.reply_text("❌ Unsupported file type. Only JPG and PNG allowed.")
+                return
+
+        if file_path:
+            exists = os.path.exists(file_path)
+            size = os.path.getsize(file_path) if exists else 0
+            logging.info(f"Saved file: {file_path} | Exists: {exists} | Size: {size} bytes")
+
+            if size > 0:
+                session["images"].append(file_path)
+                session["last_active"] = current_time
+                await update.message.reply_text("📷 Image saved.")
+            else:
+                await update.message.reply_text("❌ Failed to save image (file empty).")
+                if exists:
+                    os.remove(file_path)
         else:
-            await update.message.reply_text("❌ Unsupported file type. Only JPG and PNG allowed.")
-            return
+            await update.message.reply_text("❌ No valid image found.")
 
-    if file_path:
-        session["images"].append(file_path)
-        session["last_active"] = current_time
-        await update.message.reply_text("📷 Image saved.")
-    else:
-        await update.message.reply_text("❌ No valid image found.")
+    except Exception as e:
+        logging.error(f"Error handling image upload: {e}")
+        await update.message.reply_text("❌ Error while uploading image.")
 
 
 async def handle_trigger(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -111,13 +125,15 @@ async def receive_pdf_name(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     images = []
     logging.info(f"Session images: {session.get('images', [])}")
+
     for path in session.get("images", []):
         try:
-            img = Image.open(path).convert("RGB")
+            img = Image.open(path)
+            logging.info(f"{path} opened. Mode: {img.mode}, Size: {img.size}")
+            img = img.convert("RGB")
             images.append(img)
-            logging.info(f"Loaded image: {path} - Size: {img.size}")
         except Exception as e:
-            logging.warning(f"Failed to open image: {path} - {e}")
+            logging.warning(f"Could not open image {path}: {e}")
 
     if not images:
         await update.message.reply_text("❌ No valid images to convert.")
@@ -126,26 +142,19 @@ async def receive_pdf_name(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     pdf_path = f"{name}.pdf"
     logging.info(f"Creating PDF at: {pdf_path} with {len(images)} images")
-    
+
     try:
         with open(pdf_path, "wb") as f:
-            # Convert all images to RGB mode and ensure they're not empty
             rgb_images = []
             for img in images:
-                if img.mode != 'RGB':
-                    img = img.convert('RGB')
-                # Ensure image has content
-                if img.getbbox():
-                    rgb_images.append(img)
-                else:
-                    logging.warning(f"Skipping empty image: {img.size}")
-            
+                rgb_images.append(img)  # getbbox() removed for now
+            logging.info(f"Total valid images to write to PDF: {len(rgb_images)}")
+
             if not rgb_images:
                 logging.error("No valid images to convert to PDF")
                 await update.message.reply_text("❌ No valid images to convert. Please try again.")
                 return ConversationHandler.END
-                
-            # Save first image as PDF
+
             rgb_images[0].save(
                 f,
                 format="PDF",
@@ -154,9 +163,8 @@ async def receive_pdf_name(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 resolution=100.0,
                 quality=95
             )
+
         logging.info(f"PDF created successfully at: {pdf_path}")
-        
-        # Verify PDF file exists and has content
         if os.path.exists(pdf_path):
             file_size = os.path.getsize(pdf_path)
             logging.info(f"PDF file size: {file_size} bytes")
@@ -164,23 +172,20 @@ async def receive_pdf_name(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 logging.error("PDF file was created but is empty!")
         else:
             logging.error("PDF file was not created!")
-            
+
     except Exception as e:
         logging.error(f"Error creating PDF: {e}")
         await update.message.reply_text("❌ Error creating PDF. Please try again.")
         return ConversationHandler.END
 
     try:
-        await update.message.reply_document(
-            InputFile(pdf_path, filename=f"{name}.pdf")
-        )
+        await update.message.reply_document(InputFile(pdf_path, filename=f"{name}.pdf"))
         logging.info("PDF sent successfully to user")
     except Exception as e:
         logging.error(f"Error sending PDF to user: {e}")
         await update.message.reply_text("❌ Error sending PDF. Please try again.")
         return ConversationHandler.END
 
-    # Cleanup
     try:
         os.remove(pdf_path)
         for img_path in session["images"]:
@@ -200,7 +205,8 @@ async def run_bot():
     WEBHOOK_URL = os.getenv("WEBHOOK_URL")
 
     if not TOKEN or not WEBHOOK_URL:
-        raise RuntimeError("Missing BOT_TOKEN or WEBHOOK_URL environment variable")
+        logging.critical("Missing BOT_TOKEN or WEBHOOK_URL environment variable")
+        exit(1)
 
     telegram_app = ApplicationBuilder().token(TOKEN).build()
 
@@ -220,8 +226,7 @@ async def run_bot():
     await telegram_app.initialize()
     await telegram_app.start()
     logging.info("Bot started with webhook.")
-    
-    # Keep the event loop running
+
     while True:
         await asyncio.sleep(1)
 
@@ -234,16 +239,13 @@ def run_flask():
 
 # --- Main Entrypoint ---
 if __name__ == "__main__":
-    # Create and set the event loop
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
-    
-    # Start Flask in a separate thread
+
     flask_thread = threading.Thread(target=run_flask)
     flask_thread.daemon = True
     flask_thread.start()
-    
-    # Run the bot in the main thread
+
     try:
         loop.run_until_complete(run_bot())
     except KeyboardInterrupt:
