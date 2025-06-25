@@ -83,27 +83,19 @@ async def handle_images(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await update.message.reply_text("❌ Unsupported file type. Only JPG and PNG allowed.")
                 return
 
-        if file_path:
-            if os.path.exists(file_path):
-                size = os.path.getsize(file_path)
-                logging.info(f"Saved file: {file_path} | Size: {size} bytes")
-                if size > 0:
-                    session["images"].append(file_path)
-                    session["last_active"] = current_time
-                    await update.message.reply_text("📷 Image saved.")
-                else:
-                    logging.error(f"Image file {file_path} is empty after download.")
-                    await update.message.reply_text("❌ Failed to save image (file empty).")
-                    os.remove(file_path)
+        if file_path and os.path.exists(file_path):
+            size = os.path.getsize(file_path)
+            if size > 0:
+                session["images"].append(file_path)
+                session["last_active"] = current_time
+                await update.message.reply_text("📷 Image saved.")
             else:
-                logging.error(f"File path {file_path} does not exist after download.")
-                await update.message.reply_text("❌ Failed to save image (file missing).")
+                await update.message.reply_text("❌ Failed to save image. File is empty.")
         else:
-            logging.error("No file path generated in handle_images")
             await update.message.reply_text("❌ No valid image found.")
 
     except Exception as e:
-        logging.exception("❌ Exception in handle_images:")
+        logging.exception("❌ Error handling image upload:")
         await update.message.reply_text("❌ Error while uploading image.")
 
 
@@ -132,42 +124,32 @@ async def receive_pdf_name(update: Update, context: ContextTypes.DEFAULT_TYPE):
     session = user_sessions.get(user_id, {})
 
     images = []
-    logging.info(f"Session images: {session.get('images', [])}")
-
     for path in session.get("images", []):
         try:
             img = Image.open(path)
             logging.info(f"{path} opened. Mode: {img.mode}, Size: {img.size}")
-            img = img.convert("RGB")
+            if img.mode != 'RGB':
+                img = img.convert("RGB")
             images.append(img)
         except Exception as e:
-            logging.warning(f"Could not open image {path}: {e}")
+            logging.warning(f"Error opening image {path}: {e}")
 
     if not images:
         await update.message.reply_text("❌ No valid images to convert.")
-        logging.error("No valid images to convert. PDF not created.")
         return ConversationHandler.END
 
     pdf_path = f"/tmp/{name}.pdf"
-    logging.info(f"Creating PDF at: {pdf_path} with {len(images)} images")
-
     try:
-        with open(pdf_path, "wb") as f:
-            images[0].save(
-                f,
-                format="PDF",
-                save_all=True,
-                append_images=images[1:],
-                resolution=100.0,
-                quality=95
-            )
+        # ✅ Real fix: use path instead of open file object
+        images[0].save(
+            pdf_path,
+            format="PDF",
+            save_all=True,
+            append_images=images[1:]
+        )
 
-        logging.info(f"PDF created successfully at: {pdf_path}")
-        if os.path.exists(pdf_path):
-            size = os.path.getsize(pdf_path)
-            logging.info(f"PDF file size: {size} bytes")
-            if size == 0:
-                logging.error("PDF file was created but is empty!")
+        size = os.path.getsize(pdf_path)
+        logging.info(f"PDF created at {pdf_path} | Size: {size} bytes")
 
     except Exception as e:
         logging.error(f"Error creating PDF: {e}")
@@ -176,17 +158,16 @@ async def receive_pdf_name(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     try:
         await update.message.reply_document(InputFile(pdf_path, filename=f"{name}.pdf"))
-        logging.info("PDF sent successfully to user")
+        logging.info("✅ PDF sent to user.")
     except Exception as e:
-        logging.error(f"Error sending PDF to user: {e}")
-        await update.message.reply_text("❌ Error sending PDF. Please try again.")
+        logging.error(f"Error sending PDF: {e}")
+        await update.message.reply_text("❌ Error sending PDF.")
         return ConversationHandler.END
 
     try:
         os.remove(pdf_path)
         for img_path in session["images"]:
             os.remove(img_path)
-        logging.info("Cleanup completed successfully")
     except Exception as e:
         logging.warning(f"Cleanup error: {e}")
 
@@ -201,8 +182,7 @@ async def run_bot():
     WEBHOOK_URL = os.getenv("WEBHOOK_URL")
 
     if not TOKEN or not WEBHOOK_URL:
-        logging.critical("Missing BOT_TOKEN or WEBHOOK_URL environment variable")
-        exit(1)
+        raise RuntimeError("❌ Missing BOT_TOKEN or WEBHOOK_URL in environment")
 
     telegram_app = ApplicationBuilder().token(TOKEN).build()
 
@@ -216,12 +196,12 @@ async def run_bot():
     telegram_app.add_handler(MessageHandler(filters.PHOTO | filters.Document.IMAGE, handle_images))
     telegram_app.add_handler(conv_handler)
 
-    logging.info(f"Setting webhook to {WEBHOOK_URL}")
+    logging.info(f"🌐 Setting webhook: {WEBHOOK_URL}")
     await telegram_app.bot.set_webhook(url=WEBHOOK_URL)
 
     await telegram_app.initialize()
     await telegram_app.start()
-    logging.info("Bot started with webhook.")
+    logging.info("🤖 Bot started via webhook")
 
     while True:
         await asyncio.sleep(1)
@@ -233,7 +213,7 @@ def run_flask():
     app.run(host="0.0.0.0", port=port)
 
 
-# --- Main Entrypoint ---
+# --- Entrypoint ---
 if __name__ == "__main__":
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
@@ -245,6 +225,6 @@ if __name__ == "__main__":
     try:
         loop.run_until_complete(run_bot())
     except KeyboardInterrupt:
-        logging.info("Bot stopped by user")
+        logging.info("🛑 Bot stopped by user")
     finally:
         loop.close()
