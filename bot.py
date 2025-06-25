@@ -45,6 +45,11 @@ def is_image_file(filename):
     return filename.lower().endswith((".jpg", ".jpeg", ".png"))
 
 
+def sanitize_filename(name):
+    import re
+    return re.sub(r'[^\w\-_. ]', '_', name)
+
+
 # --- Handlers ---
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("👋 Send JPG or PNG images (as photos or documents). Type 'pdf' when done.")
@@ -63,39 +68,42 @@ async def handle_images(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         if update.message.photo:
             photo = await update.message.photo[-1].get_file()
-            file_path = f"{user_id}_{photo.file_id}.jpg"
-            with open(file_path, 'wb') as f:
-                await photo.download(out=f)
+            file_path = f"/tmp/{user_id}_{photo.file_id}.jpg"
+            await photo.download_to_drive(file_path)
+            logging.info(f"Downloaded photo to {file_path}")
 
         elif update.message.document:
             doc = update.message.document
             if is_image_file(doc.file_name):
-                file_path = f"{user_id}_{doc.file_unique_id}_{doc.file_name}"
+                file_path = f"/tmp/{user_id}_{doc.file_unique_id}_{doc.file_name}"
                 doc_file = await doc.get_file()
-                with open(file_path, 'wb') as f:
-                    await doc_file.download(out=f)
+                await doc_file.download_to_drive(file_path)
+                logging.info(f"Downloaded document to {file_path}")
             else:
                 await update.message.reply_text("❌ Unsupported file type. Only JPG and PNG allowed.")
                 return
 
         if file_path:
-            exists = os.path.exists(file_path)
-            size = os.path.getsize(file_path) if exists else 0
-            logging.info(f"Saved file: {file_path} | Exists: {exists} | Size: {size} bytes")
-
-            if size > 0:
-                session["images"].append(file_path)
-                session["last_active"] = current_time
-                await update.message.reply_text("📷 Image saved.")
-            else:
-                await update.message.reply_text("❌ Failed to save image (file empty).")
-                if exists:
+            if os.path.exists(file_path):
+                size = os.path.getsize(file_path)
+                logging.info(f"Saved file: {file_path} | Size: {size} bytes")
+                if size > 0:
+                    session["images"].append(file_path)
+                    session["last_active"] = current_time
+                    await update.message.reply_text("📷 Image saved.")
+                else:
+                    logging.error(f"Image file {file_path} is empty after download.")
+                    await update.message.reply_text("❌ Failed to save image (file empty).")
                     os.remove(file_path)
+            else:
+                logging.error(f"File path {file_path} does not exist after download.")
+                await update.message.reply_text("❌ Failed to save image (file missing).")
         else:
+            logging.error("No file path generated in handle_images")
             await update.message.reply_text("❌ No valid image found.")
 
     except Exception as e:
-        logging.error(f"Error handling image upload: {e}")
+        logging.exception("❌ Exception in handle_images:")
         await update.message.reply_text("❌ Error while uploading image.")
 
 
@@ -120,7 +128,7 @@ async def handle_trigger(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def receive_pdf_name(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
-    name = update.message.text.strip()
+    name = sanitize_filename(update.message.text.strip())
     session = user_sessions.get(user_id, {})
 
     images = []
@@ -140,38 +148,26 @@ async def receive_pdf_name(update: Update, context: ContextTypes.DEFAULT_TYPE):
         logging.error("No valid images to convert. PDF not created.")
         return ConversationHandler.END
 
-    pdf_path = f"{name}.pdf"
+    pdf_path = f"/tmp/{name}.pdf"
     logging.info(f"Creating PDF at: {pdf_path} with {len(images)} images")
 
     try:
         with open(pdf_path, "wb") as f:
-            rgb_images = []
-            for img in images:
-                rgb_images.append(img)  # getbbox() removed for now
-            logging.info(f"Total valid images to write to PDF: {len(rgb_images)}")
-
-            if not rgb_images:
-                logging.error("No valid images to convert to PDF")
-                await update.message.reply_text("❌ No valid images to convert. Please try again.")
-                return ConversationHandler.END
-
-            rgb_images[0].save(
+            images[0].save(
                 f,
                 format="PDF",
                 save_all=True,
-                append_images=rgb_images[1:],
+                append_images=images[1:],
                 resolution=100.0,
                 quality=95
             )
 
         logging.info(f"PDF created successfully at: {pdf_path}")
         if os.path.exists(pdf_path):
-            file_size = os.path.getsize(pdf_path)
-            logging.info(f"PDF file size: {file_size} bytes")
-            if file_size == 0:
+            size = os.path.getsize(pdf_path)
+            logging.info(f"PDF file size: {size} bytes")
+            if size == 0:
                 logging.error("PDF file was created but is empty!")
-        else:
-            logging.error("PDF file was not created!")
 
     except Exception as e:
         logging.error(f"Error creating PDF: {e}")
